@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime as dt, timedelta, datetime
 import voluptuous as vol
@@ -104,10 +105,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     api = MyPyllantAPI(
         username=username, password=password, brand=brand, country=country
     )
-    try:
-        await api.login()
-    except (AuthenticationFailed, LoginEndpointInvalid, RealmInvalid) as e:
-        raise ConfigEntryAuthFailed from e
+    await _login_with_retry(api)
 
     system_coordinator = SystemCoordinator(
         hass, api, entry, timedelta(seconds=update_interval)
@@ -219,3 +217,28 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN].pop(entry.entry_id)
 
     return unload_ok
+
+
+async def _login_with_retry(api: MyPyllantAPI) -> None:
+    """Attempt to log in, retrying with exponential back-off on transient errors."""
+    max_attempts = 30
+    max_pause_seconds = 60
+    pause = 1
+    for attempt in range(max_attempts):
+        try:
+            await api.login()
+            break
+        except (AuthenticationFailed, LoginEndpointInvalid, RealmInvalid) as e:
+            raise ConfigEntryAuthFailed from e
+        except Exception as e:
+            if attempt == max_attempts - 1:
+                raise
+            _LOGGER.debug(
+                "Login failed (attempt %s/%s), retrying in %ss: %s",
+                attempt + 1,
+                max_attempts,
+                pause,
+                e,
+            )
+            await asyncio.sleep(pause)
+            pause = min(pause * 2, max_pause_seconds)
